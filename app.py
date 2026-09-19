@@ -16,7 +16,7 @@ from google.genai import types
 # ============================================================
 
 APP_NAME = "JavaChat"
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+REQUESTED_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 KB_FILE = "java.txt"
 
 MAX_HISTORY_MESSAGES = 8
@@ -586,6 +586,67 @@ def create_gemini_client() -> genai.Client | None:
 client = create_gemini_client()
 
 
+@st.cache_resource
+def discover_model() -> str | None:
+    """Return a model that the configured API key can use for text generation."""
+    if client is None:
+        return None
+
+    try:
+        models = list(client.models.list())
+    except Exception:
+        return None
+
+    candidates: list[tuple[str, list[str]]] = []
+
+    for model in models:
+        name = str(getattr(model, "name", ""))
+        if name.startswith("models/"):
+            name = name[len("models/"):]
+
+        actions = [
+            str(action)
+            for action in getattr(model, "supported_actions", [])
+        ]
+
+        if name and "generateContent" in actions:
+            candidates.append((name, actions))
+
+    if REQUESTED_MODEL:
+        requested = REQUESTED_MODEL.removeprefix("models/")
+        for name, _ in candidates:
+            if name == requested:
+                return name
+
+    preferred_names = (
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    )
+
+    for preferred_name in preferred_names:
+        for name, _ in candidates:
+            if name == preferred_name:
+                return name
+
+    for name, _ in candidates:
+        lowered = name.lower()
+        if (
+            "embedding" not in lowered
+            and "image" not in lowered
+            and "aqa" not in lowered
+        ):
+            return name
+
+    return None
+
+
+MODEL = discover_model()
+
+
 # ============================================================
 # AI PROMPT
 # ============================================================
@@ -696,13 +757,8 @@ Answer the latest question while maintaining context.
 def model_not_found_message(error_text: str) -> str:
     return (
         "### Gemini model unavailable\n\n"
-        "The configured model is:\n\n"
-        f"```text\n{MODEL}\n```\n\n"
-        "Set a supported model before starting Streamlit:\n\n"
-        "```powershell\n"
-        '$env:GEMINI_MODEL = "gemini-2.5-flash-lite"\n'
-        "python -m streamlit run app.py\n"
-        "```\n\n"
+        "Google did not accept the model selected for this API key. "
+        "Restart the app after checking the key and enabled Gemini API.\n\n"
         "Original error:\n\n"
         f"```text\n{error_text}\n```"
     )
@@ -724,6 +780,14 @@ def generate_answer(
 ) -> str:
     if client is None:
         return MISSING_KEY_MESSAGE
+
+    if MODEL is None:
+        return (
+            "### No compatible Gemini model found\n\n"
+            "This API key did not return a model that supports "
+            "`generateContent`. Verify the key in "
+            "`.streamlit/secrets.toml` and enable the Gemini API."
+        )
 
     prompt = build_prompt(user_question, history_messages)
 
