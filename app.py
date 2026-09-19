@@ -609,7 +609,19 @@ def discover_models() -> list[str]:
             for action in getattr(model, "supported_actions", [])
         ]
 
-        if name and "generateContent" in actions:
+        lowered_name = name.lower()
+        excluded_name = any(
+            marker in lowered_name
+            for marker in (
+                "tts",
+                "text-to-speech",
+                "embedding",
+                "image",
+                "aqa",
+            )
+        )
+
+        if name and "generateContent" in actions and not excluded_name:
             candidates.append((name, actions))
 
     preferred_names = (
@@ -822,10 +834,14 @@ def generate_answer(
             if "403" in error_text or "PERMISSION_DENIED" in error_text:
                 return permission_denied_message(error_text)
 
-            if (
-                "NOT_FOUND" not in error_text
-                and "not found" not in error_text.lower()
-            ):
+            retryable_error = (
+                "NOT_FOUND" in error_text
+                or "not found" in error_text.lower()
+                or "INVALID_ARGUMENT" in error_text
+                or "response modalities" in error_text.lower()
+            )
+
+            if not retryable_error:
                 return (
                     "### Gemini request failed\n\n"
                     f"```text\n{error_text}\n```"
