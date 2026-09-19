@@ -19,8 +19,9 @@ APP_NAME = "JavaChat"
 REQUESTED_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 KB_FILE = "java.txt"
 
-MAX_HISTORY_MESSAGES = 8
-MAX_KB_CHUNKS = 3
+MAX_HISTORY_MESSAGES = 6
+MAX_KB_CHUNKS = 2
+MAX_KB_CHARS = 6000
 
 
 # ============================================================
@@ -546,7 +547,8 @@ def find_relevant_knowledge(
     if not selected:
         selected = chunks[:1]
 
-    return "\n\n---\n\n".join(selected)
+    knowledge = "\n\n---\n\n".join(selected)
+    return knowledge[:MAX_KB_CHARS]
 
 
 kb = load_knowledge_base()
@@ -789,6 +791,30 @@ def permission_denied_message(error_text: str) -> str:
     )
 
 
+def quota_message(error_text: str) -> str:
+    retry_match = re.search(
+        r"retry(?: in| after).*?(\d+(?:\.\d+)?)s",
+        error_text,
+        re.IGNORECASE,
+    )
+    retry_text = (
+        f" Try again in about {retry_match.group(1)} seconds."
+        if retry_match
+        else " Wait briefly and try again."
+    )
+
+    return (
+        "### Gemini quota exceeded\n\n"
+        "Google has temporarily limited this API key's free-tier "
+        "input-token usage."
+        f"{retry_text}\n\n"
+        "For higher limits, review your plan and billing here:\n"
+        "https://ai.google.dev/gemini-api/docs/rate-limits\n\n"
+        "JavaChat also limits local context to reduce token usage.\n\n"
+        f"```text\n{error_text}\n```"
+    )
+
+
 def generate_answer(
     user_question: str,
     history_messages: list[dict[str, str]],
@@ -833,6 +859,13 @@ def generate_answer(
 
             if "403" in error_text or "PERMISSION_DENIED" in error_text:
                 return permission_denied_message(error_text)
+
+            if (
+                "429" in error_text
+                or "RESOURCE_EXHAUSTED" in error_text
+                or "quota" in error_text.lower()
+            ):
+                return quota_message(error_text)
 
             retryable_error = (
                 "NOT_FOUND" in error_text
