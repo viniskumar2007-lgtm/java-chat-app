@@ -587,15 +587,15 @@ client = create_gemini_client()
 
 
 @st.cache_resource
-def discover_model() -> str | None:
-    """Return a model that the configured API key can use for text generation."""
+def discover_models() -> list[str]:
+    """Return usable text-generation models reported by the API."""
     if client is None:
-        return None
+        return []
 
     try:
         models = list(client.models.list())
     except Exception:
-        return None
+        return []
 
     candidates: list[tuple[str, list[str]]] = []
 
@@ -612,25 +612,22 @@ def discover_model() -> str | None:
         if name and "generateContent" in actions:
             candidates.append((name, actions))
 
-    if REQUESTED_MODEL:
-        requested = REQUESTED_MODEL.removeprefix("models/")
-        for name, _ in candidates:
-            if name == requested:
-                return name
-
     preferred_names = (
-        "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
-        "gemini-2.0-flash-lite",
         "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
     )
 
+    ordered_names: list[str] = []
+    requested = REQUESTED_MODEL.removeprefix("models/")
+
+    if requested:
+        ordered_names.append(requested)
+
     for preferred_name in preferred_names:
-        for name, _ in candidates:
-            if name == preferred_name:
-                return name
+        if preferred_name not in ordered_names:
+            ordered_names.append(preferred_name)
 
     for name, _ in candidates:
         lowered = name.lower()
@@ -638,13 +635,19 @@ def discover_model() -> str | None:
             "embedding" not in lowered
             and "image" not in lowered
             and "aqa" not in lowered
+            and name not in ordered_names
         ):
-            return name
+            ordered_names.append(name)
 
-    return None
+    available_names = {name for name, _ in candidates}
+    return [
+        name
+        for name in ordered_names
+        if name in available_names
+    ]
 
 
-MODEL = discover_model()
+MODELS = discover_models()
 
 
 # ============================================================
@@ -757,8 +760,8 @@ Answer the latest question while maintaining context.
 def model_not_found_message(error_text: str) -> str:
     return (
         "### Gemini model unavailable\n\n"
-        "Google did not accept the model selected for this API key. "
-        "Restart the app after checking the key and enabled Gemini API.\n\n"
+        "Google rejected every model reported for this API key. "
+        "Check the key and enabled Gemini API.\n\n"
         "Original error:\n\n"
         f"```text\n{error_text}\n```"
     )
@@ -781,7 +784,7 @@ def generate_answer(
     if client is None:
         return MISSING_KEY_MESSAGE
 
-    if MODEL is None:
+    if not MODELS:
         return (
             "### No compatible Gemini model found\n\n"
             "This API key did not return a model that supports "
@@ -791,37 +794,44 @@ def generate_answer(
 
     prompt = build_prompt(user_question, history_messages)
 
-    try:
-        chat = client.chats.create(
-            model=MODEL,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.4,
-                max_output_tokens=2048,
-            ),
-        )
+    errors: list[str] = []
 
-        response = chat.send_message(prompt)
-        answer = getattr(response, "text", None)
+    for model_name in MODELS:
+        try:
+            chat = client.chats.create(
+                model=model_name,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.4,
+                    max_output_tokens=2048,
+                ),
+            )
 
-        if answer:
-            return answer
+            response = chat.send_message(prompt)
+            answer = getattr(response, "text", None)
 
-        return "I could not generate an answer. Please try again."
+            if answer:
+                return answer
 
-    except Exception as error:
-        error_text = str(error)
+            errors.append(f"{model_name}: empty response")
 
-        if "NOT_FOUND" in error_text or "not found" in error_text.lower():
-            return model_not_found_message(error_text)
+        except Exception as error:
+            error_text = str(error)
+            errors.append(f"{model_name}: {error_text}")
 
-        if "403" in error_text or "PERMISSION_DENIED" in error_text:
-            return permission_denied_message(error_text)
+            if "403" in error_text or "PERMISSION_DENIED" in error_text:
+                return permission_denied_message(error_text)
 
-        return (
-            "### Gemini request failed\n\n"
-            f"```text\n{error_text}\n```"
-        )
+            if (
+                "NOT_FOUND" not in error_text
+                and "not found" not in error_text.lower()
+            ):
+                return (
+                    "### Gemini request failed\n\n"
+                    f"```text\n{error_text}\n```"
+                )
+
+    return model_not_found_message("\n".join(errors))
 
 
 # ============================================================
